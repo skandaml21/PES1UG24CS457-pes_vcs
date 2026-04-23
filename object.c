@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <openssl/evp.h>
+#include <openssl/sha.h>
 
 // ─── PROVIDED ────────────────────────────────────────────────────────────────
 
@@ -92,13 +93,60 @@ int object_exists(const ObjectID *id) {
 //
 
 //
-// Returns 0 on success, -1 on error.
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
-    // TODO: Implement
-    (void)type; (void)data; (void)len; (void)id_out;
-    return -1;
-}
+    char header[64];
+    const char *type_str;
 
+    // Convert enum to string
+    if (type == OBJ_BLOB) type_str = "blob";
+    else if (type == OBJ_TREE) type_str = "tree";
+    else if (type == OBJ_COMMIT) type_str = "commit";
+    else return -1;
+
+    // Create header: "blob <size>\0"
+    int header_len = snprintf(header, sizeof(header), "%s %zu", type_str, len) + 1;
+
+    size_t total_size = header_len + len;
+    unsigned char *buffer = malloc(total_size);
+    if (!buffer) return -1;
+
+    memcpy(buffer, header, header_len);
+    memcpy(buffer + header_len, data, len);
+
+    // Compute SHA256
+    SHA256(buffer, total_size, id_out->hash);
+
+    // Convert hash to hex
+    char hex[65];
+    for (int i = 0; i < 32; i++) {
+        sprintf(hex + (i * 2), "%02x", id_out->hash[i]);
+    }
+    hex[64] = '\0';
+
+    // Create directories
+    mkdir(".pes", 0755);
+    mkdir(".pes/objects", 0755);
+
+    char dir[256];
+    snprintf(dir, sizeof(dir), ".pes/objects/%.2s", hex);
+    mkdir(dir, 0755);
+
+    // File path
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", dir, hex + 2);
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        free(buffer);
+        return -1;
+    }
+
+    fwrite(buffer, 1, total_size, f);
+    fclose(f);
+
+    free(buffer);
+    return 0;
+}
 // Read an object from the store.
 //
 // Steps:
@@ -122,7 +170,89 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
 // The caller is responsible for calling free(*data_out).
 // Returns 0 on success, -1 on error (file not found, corrupt, etc.).
 int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {
-    // TODO: Implement
-    (void)id; (void)type_out; (void)data_out; (void)len_out;
-    return -1;
+    char hex[65];
+
+    // Convert hash to hex
+    for (int i = 0; i < 32; i++) {
+        sprintf(hex + (i * 2), "%02x", id->hash[i]);
+    }
+    hex[64] = '\0';
+
+    // Build file path
+    char path[512];
+    snprintf(path, sizeof(path), ".pes/objects/%.2s/%s", hex, hex + 2);
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+
+    // Get file size
+    fseek(f, 0, SEEK_END);
+    size_t file_size = ftell(f);
+    rewind(f);
+
+    // Read full file
+    unsigned char *buffer = malloc(file_size);
+    if (!buffer) {
+        fclose(f);
+        return -1;
+    }
+
+    if (fread(buffer, 1, file_size, f) != file_size) {
+        free(buffer);
+        fclose(f);
+        return -1;
+    }
+
+    fclose(f);
+
+    // 🔥 ===== INTEGRITY CHECK (VERY IMPORTANT) =====
+    unsigned char computed_hash[32];
+    SHA256(buffer, file_size, computed_hash);
+
+    if (memcmp(computed_hash, id->hash, 32) != 0) {
+        free(buffer);
+        return -1;  // corruption detected
+    }
+    // 🔥 ===========================================
+
+    // Find null separator
+    size_t i = 0;
+    while (i < file_size && buffer[i] != '\0') i++;
+
+    if (i == file_size) {
+        free(buffer);
+        return -1;
+    }
+
+    buffer[i] = '\0';
+
+    // Parse header
+    char type_str[16];
+    size_t size;
+
+    sscanf((char *)buffer, "%s %zu", type_str, &size);
+
+    // Convert type string → enum
+    if (strcmp(type_str, "blob") == 0) *type_out = OBJ_BLOB;
+    else if (strcmp(type_str, "tree") == 0) *type_out = OBJ_TREE;
+    else if (strcmp(type_str, "commit") == 0) *type_out = OBJ_COMMIT;
+    else {
+        free(buffer);
+        return -1;
+    }
+
+    size_t data_offset = i + 1;
+
+    *len_out = file_size - data_offset;
+
+    *data_out = malloc(*len_out);
+    if (!*data_out) {
+        free(buffer);
+        return -1;
+    }
+
+    memcpy(*data_out, buffer + data_offset, *len_out);
+
+    free(buffer);
+    return 0;
 }

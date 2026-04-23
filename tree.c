@@ -15,7 +15,8 @@
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
-
+#include "index.h"
+#include <stdlib.h>
 // ─── Mode Constants ─────────────────────────────────────────────────────────
 
 #define MODE_FILE      0100644
@@ -130,8 +131,36 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
 //
 // Returns 0 on success, -1 on error.
 int tree_from_index(ObjectID *id_out) {
-    // TODO: Implement recursive tree building
-    // (See Lab Appendix for logical steps)
-    (void)id_out;
-    return -1;
+    Index idx;
+
+    // Load index
+    if (index_load(&idx) != 0) return -1;
+
+    // Temporary buffer for tree content
+    char buffer[4096];
+    size_t offset = 0;
+
+    for (size_t i = 0; i < idx.count; i++) {
+        IndexEntry *e = &idx.entries[i];
+
+        // Format: "mode blob <hash> <path>\n"
+        offset += snprintf(buffer + offset, sizeof(buffer) - offset,
+                           "%o blob ", e->mode);
+
+        // Convert hash to hex
+        for (int j = 0; j < 32; j++) {
+            offset += snprintf(buffer + offset, sizeof(buffer) - offset,
+                               "%02x", e->hash.hash[j]);
+        }
+
+        offset += snprintf(buffer + offset, sizeof(buffer) - offset,
+                           " %s\n", e->path);
+    }
+
+    // Write tree object
+    if (object_write(OBJ_TREE, buffer, offset, id_out) != 0) {
+        return -1;
+    }
+
+    return 0;
 }
